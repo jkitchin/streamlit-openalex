@@ -74,6 +74,226 @@ def search_openalex_authors(query: str, per_page: int = 20) -> Optional[Dict]:
         return None
 
 
+def fetch_author_works(author_id: str, per_page: int = 200) -> Optional[List[Dict]]:
+    """
+    Fetch all works for a specific author from OpenAlex API.
+
+    Args:
+        author_id: OpenAlex author ID (e.g., 'A1234567890')
+        per_page: Number of results per page (default: 200, max allowed)
+
+    Returns:
+        List of work dictionaries, or None if error occurs
+    """
+    # Extract the author ID from the full URL if needed
+    if 'openalex.org' in author_id:
+        author_id = author_id.split('/')[-1]
+
+    url = "https://api.openalex.org/works"
+    params = {
+        "filter": f"author.id:{author_id}",
+        "per_page": per_page,
+        "sort": "publication_year:asc",
+    }
+
+    headers = {
+        "User-Agent": "mailto:user@example.com"
+    }
+
+    try:
+        response = requests.get(url, params=params, headers=headers)
+        response.raise_for_status()
+        data = response.json()
+        return data.get('results', [])
+    except requests.exceptions.RequestException as e:
+        st.error(f"Error fetching author works: {e}")
+        return None
+
+
+def calculate_academic_age(author: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Calculate academic age and confidence score for an author.
+
+    Uses publication density analysis to find the first year of sustained activity,
+    combined with temporal and topic consistency checks.
+
+    Args:
+        author: Author dictionary from OpenAlex API
+
+    Returns:
+        Dictionary containing:
+        - academic_age: Years since sustained activity began
+        - confidence_score: 0-100 confidence percentage
+        - confidence_level: 'High', 'Medium', or 'Low'
+        - first_pub_year: Year of first publication in sustained activity
+        - earliest_pub_year: Absolute earliest publication year
+        - excluded_pubs: Number of publications excluded as outliers
+        - notes: Explanation of calculation
+    """
+    from datetime import datetime
+    from collections import defaultdict
+
+    current_year = datetime.now().year
+    author_id = author.get('id', '')
+
+    # Fetch author's works
+    works = fetch_author_works(author_id)
+
+    if not works or len(works) == 0:
+        return {
+            'academic_age': None,
+            'confidence_score': 0,
+            'confidence_level': 'N/A',
+            'first_pub_year': None,
+            'earliest_pub_year': None,
+            'excluded_pubs': 0,
+            'notes': 'No publications found'
+        }
+
+    # Extract publication years
+    pub_years = []
+    for work in works:
+        year = work.get('publication_year')
+        if year and year > 1900 and year <= current_year:  # Sanity check
+            pub_years.append(year)
+
+    if not pub_years:
+        return {
+            'academic_age': None,
+            'confidence_score': 0,
+            'confidence_level': 'N/A',
+            'first_pub_year': None,
+            'earliest_pub_year': None,
+            'excluded_pubs': 0,
+            'notes': 'No valid publication years found'
+        }
+
+    pub_years.sort()
+    earliest_year = pub_years[0]
+
+    # Count publications per year
+    year_counts = defaultdict(int)
+    for year in pub_years:
+        year_counts[year] += 1
+
+    # Find first year of sustained activity (at least 2 pubs within any 3-year window)
+    sustained_start_year = None
+    for year in range(earliest_year, current_year + 1):
+        pubs_in_window = sum(year_counts.get(y, 0) for y in range(year, year + 3))
+        if pubs_in_window >= 2:
+            sustained_start_year = year
+            break
+
+    # If no sustained activity found, use earliest year
+    if sustained_start_year is None:
+        sustained_start_year = earliest_year
+
+    # Calculate academic age
+    academic_age = current_year - sustained_start_year
+
+    # Count excluded publications (before sustained activity)
+    excluded_pubs = sum(1 for y in pub_years if y < sustained_start_year)
+
+    # Calculate confidence score components
+    confidence_components = []
+
+    # 1. Temporal consistency (40% weight)
+    # Check for large gaps before sustained activity
+    gap_before_sustained = sustained_start_year - earliest_year
+    if gap_before_sustained == 0:
+        temporal_score = 1.0
+    elif gap_before_sustained <= 2:
+        temporal_score = 0.9
+    elif gap_before_sustained <= 5:
+        temporal_score = 0.7
+    elif gap_before_sustained <= 10:
+        temporal_score = 0.5
+    else:
+        temporal_score = 0.3
+
+    confidence_components.append(('temporal', temporal_score, 0.4))
+
+    # 2. Publication volume consistency (30% weight)
+    # More publications in early sustained period = higher confidence
+    early_period_pubs = sum(1 for y in pub_years if sustained_start_year <= y < sustained_start_year + 5)
+    if early_period_pubs >= 10:
+        volume_score = 1.0
+    elif early_period_pubs >= 5:
+        volume_score = 0.8
+    elif early_period_pubs >= 3:
+        volume_score = 0.6
+    else:
+        volume_score = 0.4
+
+    confidence_components.append(('volume', volume_score, 0.3))
+
+    # 3. Topic consistency (30% weight)
+    # Compare early papers' topics with overall author profile
+    author_concepts = author.get('x_concepts', [])
+    if author_concepts and len(works) >= 5:
+        # Get top author concepts
+        top_author_concepts = set(c.get('display_name', '').lower()
+                                  for c in author_concepts[:10] if c.get('display_name'))
+
+        # Get concepts from early works (first 5 years of sustained activity)
+        early_works = [w for w in works
+                      if w.get('publication_year') and
+                      sustained_start_year <= w.get('publication_year') < sustained_start_year + 5]
+
+        if early_works:
+            early_concepts = set()
+            for work in early_works[:10]:  # Sample first 10 early works
+                work_concepts = work.get('concepts', [])
+                for concept in work_concepts[:5]:  # Top 5 concepts per work
+                    concept_name = concept.get('display_name', '').lower()
+                    if concept_name:
+                        early_concepts.add(concept_name)
+
+            # Calculate overlap
+            if early_concepts and top_author_concepts:
+                overlap = len(early_concepts & top_author_concepts)
+                topic_score = min(overlap / 5, 1.0)  # Normalize to 0-1
+            else:
+                topic_score = 0.5  # Neutral if no concept data
+        else:
+            topic_score = 0.5
+    else:
+        topic_score = 0.5  # Neutral if insufficient data
+
+    confidence_components.append(('topic', topic_score, 0.3))
+
+    # Calculate weighted confidence score
+    total_confidence = sum(score * weight for _, score, weight in confidence_components)
+    confidence_percentage = int(total_confidence * 100)
+
+    # Determine confidence level
+    if confidence_percentage >= 80:
+        confidence_level = 'High'
+    elif confidence_percentage >= 60:
+        confidence_level = 'Medium'
+    else:
+        confidence_level = 'Low'
+
+    # Generate notes
+    notes = []
+    if excluded_pubs > 0:
+        notes.append(f"Excluded {excluded_pubs} publication(s) before sustained activity")
+    if gap_before_sustained > 5:
+        notes.append(f"{gap_before_sustained}-year gap before sustained activity")
+    if excluded_pubs == 0 and gap_before_sustained == 0:
+        notes.append("No outliers detected")
+
+    return {
+        'academic_age': academic_age,
+        'confidence_score': confidence_percentage,
+        'confidence_level': confidence_level,
+        'first_pub_year': sustained_start_year,
+        'earliest_pub_year': earliest_year,
+        'excluded_pubs': excluded_pubs,
+        'notes': '; '.join(notes) if notes else 'Based on sustained publication activity'
+    }
+
+
 def display_work(work: Dict[str, Any]) -> None:
     """
     Display a single work in the Streamlit UI.
@@ -186,7 +406,55 @@ def display_authors(authors_data: Dict) -> None:
                 i10_index = author.get('summary_stats', {}).get('i10_index', 0)
                 st.metric("i10-index", i10_index)
 
+            # Academic Age Section
+            st.markdown("---")
+            st.markdown("**📅 Academic Age Analysis**")
+
+            with st.spinner("Calculating academic age..."):
+                age_data = calculate_academic_age(author)
+
+            if age_data['academic_age'] is not None:
+                col_age1, col_age2, col_age3 = st.columns(3)
+
+                with col_age1:
+                    # Academic age with confidence indicator
+                    confidence_color = {
+                        'High': '🟢',
+                        'Medium': '🟡',
+                        'Low': '🔴',
+                        'N/A': '⚪'
+                    }.get(age_data['confidence_level'], '⚪')
+
+                    st.metric(
+                        "Academic Age",
+                        f"{age_data['academic_age']} years",
+                        help="Years since sustained publication activity began"
+                    )
+
+                with col_age2:
+                    st.metric(
+                        "Confidence",
+                        f"{confidence_color} {age_data['confidence_score']}%",
+                        help=f"Confidence level: {age_data['confidence_level']}"
+                    )
+
+                with col_age3:
+                    st.metric(
+                        "First Pub Year",
+                        age_data['first_pub_year'],
+                        help="Year of first sustained publication"
+                    )
+
+                # Additional details
+                if age_data['excluded_pubs'] > 0 or age_data['earliest_pub_year'] != age_data['first_pub_year']:
+                    st.caption(f"ℹ️ {age_data['notes']}")
+                    if age_data['excluded_pubs'] > 0:
+                        st.caption(f"Earliest publication: {age_data['earliest_pub_year']}")
+            else:
+                st.info(f"⚠️ {age_data['notes']}")
+
             # Concepts
+            st.markdown("---")
             concepts = author.get('x_concepts', [])
             if concepts:
                 st.markdown("**Research Areas:**")
