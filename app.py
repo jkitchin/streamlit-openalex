@@ -77,6 +77,38 @@ def search_openalex_authors(query: str, per_page: int = 20) -> Optional[Dict]:
         return None
 
 
+def autocomplete_authors(query: str) -> Optional[List[Dict]]:
+    """
+    Get autocomplete suggestions for author names using OpenAlex API.
+
+    This endpoint is optimized for fast type-ahead style search.
+
+    Args:
+        query: Partial author name to autocomplete
+
+    Returns:
+        List of author suggestion dictionaries, or None if error occurs
+    """
+    if not query or len(query) < 2:
+        return []
+
+    url = "https://api.openalex.org/autocomplete/authors"
+    params = {"q": query}
+
+    headers = {
+        "User-Agent": "mailto:user@example.com"  # Polite pool access
+    }
+
+    try:
+        response = requests.get(url, params=params, headers=headers, timeout=5)
+        response.raise_for_status()
+        data = response.json()
+        return data.get('results', [])
+    except requests.exceptions.RequestException as e:
+        st.error(f"Error fetching autocomplete suggestions: {e}")
+        return []
+
+
 def fetch_author_works(author_id: str, per_page: int = 200) -> Optional[List[Dict]]:
     """
     Fetch all works for a specific author from OpenAlex API.
@@ -681,11 +713,58 @@ def main():
     with tab2:
         st.header("Search for Authors")
 
-        authors_query = st.text_input(
-            "Enter search query for authors:",
-            placeholder="e.g., author name, institution, etc.",
-            key="authors_query"
+        # Initialize session state for autocomplete
+        if 'author_suggestions' not in st.session_state:
+            st.session_state.author_suggestions = []
+        if 'selected_author' not in st.session_state:
+            st.session_state.selected_author = None
+        if 'author_input_text' not in st.session_state:
+            st.session_state.author_input_text = ""
+
+        # Text input for author name with autocomplete
+        author_input = st.text_input(
+            "Enter author name:",
+            placeholder="Start typing an author name...",
+            key="author_name_input",
+            help="Type at least 2 characters to see suggestions"
         )
+
+        # Fetch autocomplete suggestions when input changes
+        if author_input and len(author_input) >= 2 and author_input != st.session_state.author_input_text:
+            st.session_state.author_input_text = author_input
+            st.session_state.author_suggestions = autocomplete_authors(author_input)
+            st.session_state.selected_author = None
+
+        # Display autocomplete suggestions if available
+        if st.session_state.author_suggestions and len(st.session_state.author_suggestions) > 0:
+            st.markdown("**Select from suggestions:**")
+
+            # Create a dictionary mapping display text to author data
+            suggestions_dict = {}
+            for author in st.session_state.author_suggestions:
+                display_name = author.get('display_name', 'Unknown')
+                hint = author.get('hint', '')
+                works_count = author.get('works_count', 0)
+
+                # Format the display text
+                if hint:
+                    display_text = f"{display_name} ({hint}) - {works_count} works"
+                else:
+                    display_text = f"{display_name} - {works_count} works"
+
+                suggestions_dict[display_text] = author
+
+            # Selectbox for choosing from suggestions
+            selected_display = st.selectbox(
+                "Author suggestions:",
+                options=[""] + list(suggestions_dict.keys()),
+                format_func=lambda x: "Choose an author..." if x == "" else x,
+                key="author_selectbox"
+            )
+
+            # Update selected author when user picks from selectbox
+            if selected_display and selected_display != "":
+                st.session_state.selected_author = suggestions_dict[selected_display]
 
         col1, col2 = st.columns([3, 1])
         with col1:
@@ -696,18 +775,28 @@ def main():
             )
         with col2:
             authors_search_btn = st.button(
-                "🔍 Search Authors",
+                "🔍 Search",
                 type="primary",
                 key="search_authors"
             )
 
-        if authors_search_btn and authors_query:
-            with st.spinner("Searching..."):
-                authors_data = search_openalex_authors(authors_query, authors_per_page)
-                if authors_data:
-                    display_authors(authors_data)
-        elif authors_search_btn and not authors_query:
-            st.warning("Please enter a search query.")
+        # Perform search when button is clicked
+        if authors_search_btn:
+            search_query = None
+
+            # Use selected author's name if available, otherwise use text input
+            if st.session_state.selected_author:
+                search_query = st.session_state.selected_author.get('display_name')
+            elif author_input:
+                search_query = author_input
+
+            if search_query:
+                with st.spinner("Searching..."):
+                    authors_data = search_openalex_authors(search_query, authors_per_page)
+                    if authors_data:
+                        display_authors(authors_data)
+            else:
+                st.warning("Please enter an author name or select from suggestions.")
 
     # Footer
     st.markdown("---")
