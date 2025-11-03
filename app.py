@@ -718,26 +718,51 @@ def main():
             st.session_state.author_suggestions = []
         if 'selected_author' not in st.session_state:
             st.session_state.selected_author = None
-        if 'author_input_text' not in st.session_state:
-            st.session_state.author_input_text = ""
 
-        # Text input for author name with autocomplete
-        author_input = st.text_input(
-            "Enter author name:",
-            placeholder="Start typing an author name...",
-            key="author_name_input",
-            help="Type at least 2 characters to see suggestions"
-        )
+        st.info("💡 **Tip:** Type an author name and press Enter to see autocomplete suggestions, or enter a full name to search directly.")
 
-        # Fetch autocomplete suggestions when input changes
-        if author_input and len(author_input) >= 2 and author_input != st.session_state.author_input_text:
-            st.session_state.author_input_text = author_input
-            st.session_state.author_suggestions = autocomplete_authors(author_input)
-            st.session_state.selected_author = None
+        # Create columns for input and autocomplete button
+        col_input, col_autocomplete = st.columns([3, 1])
+
+        with col_input:
+            # Text input for author name with autocomplete
+            author_input = st.text_input(
+                "Enter author name:",
+                placeholder="e.g., John Smith",
+                key="author_name_input",
+                help="Type at least 2 characters and press Enter, or click 'Get Suggestions'"
+            )
+
+        with col_autocomplete:
+            # Button to trigger autocomplete explicitly
+            st.markdown("<br>", unsafe_allow_html=True)  # Align button with input
+            autocomplete_btn = st.button(
+                "🔍 Get Suggestions",
+                key="autocomplete_button",
+                help="Click to fetch author suggestions"
+            )
+
+        # Fetch autocomplete suggestions when button is clicked or when Enter is pressed
+        should_fetch_suggestions = False
+
+        # Check if button was clicked
+        if autocomplete_btn and author_input and len(author_input) >= 2:
+            should_fetch_suggestions = True
+        # Check if text input changed (user pressed Enter)
+        elif author_input and len(author_input) >= 2:
+            if 'last_author_input' not in st.session_state or st.session_state.last_author_input != author_input:
+                st.session_state.last_author_input = author_input
+                should_fetch_suggestions = True
+
+        # Fetch suggestions if needed
+        if should_fetch_suggestions:
+            with st.spinner("Fetching suggestions..."):
+                st.session_state.author_suggestions = autocomplete_authors(author_input)
+                st.session_state.selected_author = None
 
         # Display autocomplete suggestions if available
         if st.session_state.author_suggestions and len(st.session_state.author_suggestions) > 0:
-            st.markdown("**Select from suggestions:**")
+            st.success(f"Found {len(st.session_state.author_suggestions)} suggestions")
 
             # Create a dictionary mapping display text to author data
             suggestions_dict = {}
@@ -756,15 +781,22 @@ def main():
 
             # Selectbox for choosing from suggestions
             selected_display = st.selectbox(
-                "Author suggestions:",
+                "Select an author from suggestions:",
                 options=[""] + list(suggestions_dict.keys()),
-                format_func=lambda x: "Choose an author..." if x == "" else x,
+                format_func=lambda x: "-- Choose an author --" if x == "" else x,
                 key="author_selectbox"
             )
 
             # Update selected author when user picks from selectbox
             if selected_display and selected_display != "":
                 st.session_state.selected_author = suggestions_dict[selected_display]
+                # Show selected author info
+                selected = st.session_state.selected_author
+                st.info(f"✓ Selected: **{selected.get('display_name')}** - Click 'Search Authors' below to view details")
+        elif author_input and len(author_input) >= 2 and should_fetch_suggestions:
+            st.warning("No suggestions found. Try a different name or search directly.")
+
+        st.markdown("---")
 
         col1, col2 = st.columns([3, 1])
         with col1:
@@ -775,7 +807,7 @@ def main():
             )
         with col2:
             authors_search_btn = st.button(
-                "🔍 Search",
+                "🔍 Search Authors",
                 type="primary",
                 key="search_authors"
             )
