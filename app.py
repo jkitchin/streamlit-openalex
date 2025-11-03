@@ -9,6 +9,9 @@ import streamlit as st
 import requests
 import pandas as pd
 from typing import Dict, List, Any, Optional
+from datetime import datetime
+from collections import defaultdict
+import statistics
 
 
 def search_openalex_works(query: str, per_page: int = 10, page: int = 1) -> Dict[str, Any]:
@@ -78,8 +81,10 @@ def fetch_author_works(author_id: str, per_page: int = 200) -> Optional[List[Dic
     """
     Fetch all works for a specific author from OpenAlex API.
 
+    Supports pagination to retrieve all works beyond the 200-result limit.
+
     Args:
-        author_id: OpenAlex author ID (e.g., 'A1234567890')
+        author_id: OpenAlex author ID (e.g., 'A1234567890' or full URL)
         per_page: Number of results per page (default: 200, max allowed)
 
     Returns:
@@ -100,11 +105,34 @@ def fetch_author_works(author_id: str, per_page: int = 200) -> Optional[List[Dic
         "User-Agent": "mailto:user@example.com"
     }
 
+    all_works = []
+    page = 1
+
     try:
-        response = requests.get(url, params=params, headers=headers)
-        response.raise_for_status()
-        data = response.json()
-        return data.get('results', [])
+        while True:
+            params["page"] = page
+            response = requests.get(url, params=params, headers=headers)
+            response.raise_for_status()
+            data = response.json()
+
+            results = data.get('results', [])
+            if not results:
+                break
+
+            all_works.extend(results)
+
+            # Check if we've got all results
+            meta = data.get('meta', {})
+            if len(all_works) >= meta.get('count', 0):
+                break
+
+            page += 1
+
+            # Safety limit to avoid infinite loops
+            if page > 50:
+                break
+
+        return all_works if all_works else []
     except requests.exceptions.RequestException as e:
         st.error(f"Error fetching author works: {e}")
         return None
@@ -130,9 +158,6 @@ def calculate_academic_age(author: Dict[str, Any]) -> Dict[str, Any]:
         - excluded_pubs: Number of publications excluded as outliers
         - notes: Explanation of calculation
     """
-    from datetime import datetime
-    from collections import defaultdict
-
     current_year = datetime.now().year
     author_id = author.get('id', '')
 
@@ -294,6 +319,63 @@ def calculate_academic_age(author: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def calculate_author_metrics(works: Optional[List[Dict]], h_index: int, works_count: int) -> Dict[str, Any]:
+    """
+    Calculate advanced metrics for an author based on their works.
+
+    Args:
+        works: List of work dictionaries from OpenAlex (or None if fetch failed)
+        h_index: Author's h-index
+        works_count: Total number of works
+
+    Returns:
+        Dictionary containing calculated metrics
+    """
+    if not works or len(works) == 0:
+        return {
+            'median_citations': 0,
+            'mean_citations': 0,
+            'top_10_concentration': 0,
+            'recent_activity_rate': 0,
+            'h_index_efficiency': 0
+        }
+
+    # Extract citation counts
+    citation_counts = [work.get('cited_by_count', 0) for work in works]
+    citation_counts_sorted = sorted(citation_counts, reverse=True)
+
+    # 1. Median citations per work
+    median_citations = statistics.median(citation_counts) if citation_counts else 0
+
+    # 2. Mean citations per work
+    mean_citations = statistics.mean(citation_counts) if citation_counts else 0
+
+    # 3. Top 10% citation concentration
+    total_citations = sum(citation_counts)
+    if total_citations > 0:
+        top_10_percent_count = max(1, len(works) // 10)
+        top_10_percent_citations = sum(citation_counts_sorted[:top_10_percent_count])
+        top_10_concentration = (top_10_percent_citations / total_citations) * 100
+    else:
+        top_10_concentration = 0
+
+    # 4. Recent activity rate (last 5 years)
+    current_year = datetime.now().year
+    recent_works = [w for w in works if w.get('publication_year', 0) >= current_year - 5]
+    recent_activity_rate = (len(recent_works) / len(works)) * 100 if works else 0
+
+    # 5. h-index efficiency
+    h_index_efficiency = (h_index / works_count) if works_count > 0 else 0
+
+    return {
+        'median_citations': round(median_citations, 1),
+        'mean_citations': round(mean_citations, 1),
+        'top_10_concentration': round(top_10_concentration, 1),
+        'recent_activity_rate': round(recent_activity_rate, 1),
+        'h_index_efficiency': round(h_index_efficiency, 3)
+    }
+
+
 def display_work(work: Dict[str, Any]) -> None:
     """
     Display a single work in the Streamlit UI.
@@ -452,6 +534,56 @@ def display_authors(authors_data: Dict) -> None:
                         st.caption(f"Earliest publication: {age_data['earliest_pub_year']}")
             else:
                 st.info(f"⚠️ {age_data['notes']}")
+
+            # Advanced Metrics Section
+            st.markdown("---")
+            st.markdown("**📊 Advanced Publication Metrics**")
+
+            with st.spinner("Calculating advanced metrics..."):
+                author_id = author.get('id', '')
+                if author_id and works_count > 0:
+                    works = fetch_author_works(author_id)
+                    metrics = calculate_author_metrics(works, h_index, works_count)
+
+                    # Display advanced metrics in two rows
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric(
+                            "Median Citations",
+                            metrics['median_citations'],
+                            help="Typical citation count per work (resistant to outliers)"
+                        )
+                    with col2:
+                        st.metric(
+                            "Mean Citations",
+                            metrics['mean_citations'],
+                            help="Average citations per work"
+                        )
+                    with col3:
+                        st.metric(
+                            "h-index Efficiency",
+                            metrics['h_index_efficiency'],
+                            help="h-index divided by total works (quality vs quantity)"
+                        )
+
+                    col4, col5, col6 = st.columns(3)
+                    with col4:
+                        st.metric(
+                            "Top 10% Concentration",
+                            f"{metrics['top_10_concentration']}%",
+                            help="Percentage of citations from top 10% of papers"
+                        )
+                    with col5:
+                        st.metric(
+                            "Recent Activity",
+                            f"{metrics['recent_activity_rate']}%",
+                            help="Percentage of works published in last 5 years"
+                        )
+                    with col6:
+                        # Empty column for symmetry
+                        st.write("")
+                else:
+                    st.info("No works available to calculate advanced metrics.")
 
             # Concepts
             st.markdown("---")
