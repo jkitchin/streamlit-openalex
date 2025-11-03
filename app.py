@@ -30,7 +30,8 @@ def search_openalex_works(query: str, per_page: int = 10, page: int = 1) -> Dict
     }
     
     headers = {
-        "User-Agent": "mailto:streamlit-openalex-app@example.com"  # Polite pool
+        # TODO: Replace with your actual email for polite pool access
+        "User-Agent": "mailto:your-email@example.com"
     }
     
     try:
@@ -142,7 +143,7 @@ def main():
         )
     
     # Search button
-    if st.button("🔍 Search", type="primary") or search_query:
+    if st.button("🔍 Search", type="primary"):
         if search_query:
             with st.spinner("Searching OpenAlex..."):
                 results = search_openalex_works(
